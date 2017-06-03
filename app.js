@@ -173,6 +173,8 @@ var findDocument = function(db,query,req,res,callback,initCoords,setname){
 	//exclude the passwords from this function
 	var queryExclusions = { pw : 0 };
 	var newQuery = {query,queryExclusions};
+	console.log("new query:");
+	console.log(util.inspect(newQuery));
 	collection.find(newQuery).toArray(function(err,docs){
 		//if error, pop
 		assert.equal(err,null);
@@ -361,12 +363,6 @@ var initPullCallback = function(db,req,res,docs,initCoords){
 	//send response
 	res.setHeader('Content-Type','application/json');
 	res.status(200);
-	console.log("res status:");
-	console.log(JSON.stringify(res._headers));
-	console.log("docs:");
-	console.log(util.inspect(docs));
-	console.log("response body:");
-	console.log(JSON.stringify(docs));
 	res.status(200).send(JSON.stringify(docs));
 }
 
