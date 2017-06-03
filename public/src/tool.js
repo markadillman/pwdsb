@@ -650,12 +650,24 @@ function doQuitToHomeScreen() {
 // links up the ok and cancel functions
 // also displays text input element if boolean argument is true
 // these functions should include: messageDiv.style.display = "none";
-function displayMessage(msg, okFn, cancelFn, useTextInput) {
+// mark added option boolean parameter that, if true, will make the text block
+// a password protected field. Optional initCoords paramter to tie password
+// submissions to the correct tile.
+function displayMessage(msg, okFn, cancelFn, useTextInput, textInputPassword, initCoords) {
 	messageText.innerHTML = msg;
+	if (initCoords){
+		msgBtnOK.onclick = okFn(initCoords.xcoord,initCoords.ycoord);
+		msgBtnCancel.onclick = cancelFn;
+	}
 	msgBtnOK.onclick = okFn;
 	msgBtnCancel.onclick = cancelFn;
 	if (useTextInput) { // show the text input element
-		msgTextInput.style.display = "block";
+		if (textInputPassword === true){
+			//must be reverted in the ok and cancel functions. Reverts on refresh.
+			msgTextInput.style.type = password;
+		} else {
+			msgTextInput.style.display = "block";
+		}
 	} else { // hide it
 		msgTextInput.style.display = "none";
 	}
@@ -770,20 +782,102 @@ function doAvatarEdit() {
 	
 }
 
-// switches from game mode into tile edit mode
-// if the player has access to the current tile
-// Mark had to add args
-function doTileEdit(currentX, currentY) {
+//helper functions to the below password check. Mainly involve POSTing
+//tile and password data.
+//Request functions:
+//callback function should return status code indicating if there is a pw
+//or not on an editable tile, or if tile is uneditable.
+function tileEditRequest(xTile,yTile){
+	var payload = {};
+	payload.xcoord = xTile;
+	payload.ycoord = yTile;
+	postRequest('/editcheck',payload,tileEditCallback,postOnError);
+}
 
-	// make sure xTile and yTile are set correctly
-	if (currentX && currentY) {
-		xTile = currentX;
-		yTile = currentY;
+/*Tile edit callback has four possible request status responses as
+  a precondition: 224, for a fresh, unedited tile (not in database)
+  233 to initiate password prompt, 242 for edit deny (tile being edited).
+  Request body has structure: {xcoord:x,ycoord:y,<message:m>}
+*/
+function tileEditCallback(request){
+	//if the response is green-lighted (224), return it to commence with do edit
+	var body = JSON.parse(request.responseText);
+	if (request.status === 224){
+		if (verboseDebugging){
+			console.log("Edit authorization success.");
+			passwordApproved(body.xcoord,body.ycoord,'');
+		}
+		return request.status;
 	}
-	
-	// ### Mark - do tile lockout and password check stuff here
-	
-	// load the tile and its surroundings from the server
+	else if (request.status === 242){
+		if (verboseDebugging){
+			console.log("Edit authorization failed: Currently being edited.");
+		}
+		displayMessage(body.message,doTileExit,doTileExit,false);
+		return request.status;
+	}
+	else if (request.status === 233){
+		if (verboseDebugging){
+			console.log("Password set. Proceeding to password enter procedure.");
+		}
+		//build parameter object for submit so that client can tell server what coordinates
+		//the password they entered goes to:
+		var args = {};
+		initCoords.xcoord = body.xcoord;
+		initCoords.ycoord = body.ycoord;
+		//both of the button functions contain ways of returning text field to normal
+		displayMessage(body.message,passwordSubmit,doTileExit,true,true,initCoords);
+	}
+}
+
+//this proceeds the function above, gathering the password data and sending it to the server
+//the coordinates are optionally passed in case it is called from a non-callback context.
+function passwordSubmit(xcoord,ycoord){
+	var payload = {};
+	//gather password
+	payload.pw = document.getElementById("msgTextInput").value;
+	payload.x = xcoord;
+	payload.y = ycoord;
+	postRequest('/pwcheck',payload,passwordResponse,postOnError);
+}
+
+//this will either get an OK to edit the tile or a denial, which displays a new password prompt
+//then loops back to the function above. Data should include {xcoord:x,ycoord:y}
+function passwordResponse(request,pw){
+	var body = JSON.parse(request.responseText);
+	//if someone is now editing the tile, you must go back to game mode
+	if (request.status === 242){
+		if (verboseDebugging){
+			console.log("Edit authorization failed: Currently being edited.");
+		}
+		displayMessage(body.message,doTileExit,doTileExit,false);
+		return request.status;
+	}
+	//299 is code for incorrect password
+	else if (request.status === 299){
+		if (verboseDebugging){
+			console.log("Password incorrect.");
+		}
+		var repromptPassword = "Password incorrect. " + body.message;
+		var initCoords = {};
+		var initCoords.xcoord = body.xcoord;
+		var initCoords.ycoord = body.ycoord;
+		//
+		displayMessage(repromptPassword,passwordSubmit,doTileExit,true,true,initCoords);
+	}
+	//else password is confirmed.
+	else if (request.status === 224){
+		if (verboseDebugging){
+			console.log("Password correct. Moving to edit.");
+		}
+		passwordApproved(body.xcoord,body.ycoord,pw);
+	}
+}
+
+//this last helper function condenses transition between password and setting up art tool
+//which allows to be neatly called in password success callbacks at various stages.
+function passwordApproved(xTile,yTile,password){
+
 	svgLoadFromServer(xTile, yTile, password);
 	doLoadSurroundingsFromServer();
 	
@@ -806,6 +900,50 @@ function doTileEdit(currentX, currentY) {
 	if (debugging) {
 		console.log("Loaded editor for tile (" + xTile.toString() + ", " + yTile.toString() + ").");
 	}
+}
+// switches from game mode into tile edit mode
+// if the player has access to the current tile
+// Mark had to add args
+function doTileEdit(currentX, currentY) {
+
+	// make sure xTile and yTile are set correctly
+	if (currentX && currentY) {
+		xTile = currentX;
+		yTile = currentY;
+	}
+	
+	// ### Mark - do tile lockout and password check stuff here
+	/*  The logic flows from general to specific according to info required from the client.
+		First case, the tile has never been edited (not in database) or the tile is being
+		edited (which can only be done by one client at a time, regardless of ownership).
+		If the tile is not owned or owned but no password is set, continue to the editor.
+		Else, prompt to enter the password. If the server returns that the password does not
+		match, say so, repeat, or cancel and make message div invisible and return to gameplay.
+	*/
+	tileEditRequest(xTile,yTile);
+	// load the tile and its surroundings from the server MARK MOVED TO FINAL PASSWORD CHECK CALLBACK
+	/*svgLoadFromServer(xTile, yTile, password);
+	doLoadSurroundingsFromServer();
+	
+	// set the mode
+	previousMode = mode;
+	mode = artMode;
+
+	// display correct divs and header
+	pageHeader.innerHTML = drawingHeader;
+	avatarDisplayDiv.style.display = "none";
+	displayDiv.style.display = "block";
+	showDiv(mode);
+
+	// get the offsets again here
+	var coords = canvas.getBoundingClientRect();
+	xOffset = coords.left;
+	yOffset = coords.top;
+	
+	// debug message
+	if (debugging) {
+		console.log("Loaded editor for tile (" + xTile.toString() + ", " + yTile.toString() + ").");
+	}*/
 }
 
 // exits from the currently edited tile back into game mode
@@ -1055,6 +1193,7 @@ var polygonPointMarker = "polygonStartMarker";	// id string for polygon point ma
 var polygonMarkerRadius = 3;	// size of the polygon point markers
 
 // reset all SVG globals to default values
+// MARK ADDED reset for msgTextInput to revert to input type text rather than password
 function svgResetDefaults() {
 	// reset the zoom and pan
 	doZoomReset();
@@ -1084,6 +1223,7 @@ function svgResetDefaults() {
 	document.getElementById("shapeFillInput").checked = shapeFillChoice;
 	document.getElementById("tool0").checked = true;
 	document.getElementById("tool7").checked = true;
+	document.getElementById("msgTextInput").type = "text";
 }
 
 // initial setup of SVG
@@ -1177,15 +1317,28 @@ function generateSurroundingsPayload(){
 }
 
 //KEEP: HELPER FUNCTION : args url to post, payload as Object, onload function, error function
-function postRequest(url,payload,onload,error){
+//passwordSubmit is optional boolean. If there is a field there, it will pass the value as arg
+//to the callback.
+function postRequest(url,payload,onload,error,passwordSubmit){
+	var reqStatus;
 	var request = new XMLHttpRequest();
 	request.open("POST",url,true);
 	request.setRequestHeader('Content-Type','application/json; charset=UTF-8');
 	//request.responseType = "json";
 	request.onload = function(){
 		if (request.readyState === 4){
-			if (request.status === 200 || request.status === 242) {
-				onload(request);
+			    //200: General OK ;       224: Tile not previously edited
+			if (request.status === 200 || request.status --- 224 ||
+				//233: Tile has password; 242: Tile being edited currently
+			    request.status === 233 || request.status === 242 ||
+			    //299: Password is incorrect:
+			    request.status === 299) {
+				if (passwordSubmit){
+					onload(request,passwordSubmit);
+				}
+				else {
+					onload(request);
+				}
 			} else {
 				console.error(request.statusText);
 				error(request);
@@ -1196,11 +1349,10 @@ function postRequest(url,payload,onload,error){
 		error(request);
 	};
 	request.send(JSON.stringify(payload));
-
 }
+
 //KEEP: HELPER FUNCTION: request error helper
 function postOnError(request){
-	
 	// start Toni's code
 	// when error connecting to the server and if not using fake surroundings
 	// then fill all the boundary regions with white pixels manually
